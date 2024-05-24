@@ -25,70 +25,82 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.masterkenth;
+package com.dragz;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Provides;
-import com.masterkenth.discord.Author;
-import com.masterkenth.discord.Embed;
-import com.masterkenth.discord.Field;
-import com.masterkenth.discord.Image;
-import com.masterkenth.discord.Webhook;
+import com.dragz.discord.Author;
+import com.dragz.discord.Embed;
+import com.dragz.discord.Field;
+import com.dragz.discord.Image;
+import com.dragz.discord.Webhook;
+
+import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.text.MessageFormat;
 import java.text.NumberFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.*;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
+import javax.swing.*;
+
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.ChatMessageType;
-import net.runelite.api.Client;
-import net.runelite.api.ItemComposition;
-import net.runelite.api.NPC;
+import net.runelite.api.*;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.client.Notifier;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.config.Notification;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.NpcLootReceived;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.ui.ClientUI;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.PluginPanel;
 import net.runelite.http.api.loottracker.LootRecordType;
-import okhttp3.HttpUrl;
+import okhttp3.*;
 import org.json.JSONObject;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Discord Rare Drop Notificater",
-	description = "Sends a detailed notification via Discord webhooks whenever you get a rare/unique drop.",
-	tags = {"discord", "loot", "unique", "boss", "notification"}
+	name = "Bingo Party",
+	description = "Sends a detailed notification, with a screenshot, via Discord webhooks whenever you get a pre-determined item for your bingo.",
+	tags = {"discord", "notification", "bingo", "screenshot"}
 )
-public class DiscordRareDropNotificaterPlugin extends Plugin
+public class BingoPartyPlugin extends Plugin
 {
 	private static final String PET_MESSAGE_DUPLICATE = "You have a funny feeling like you would have been followed";
 	private static final ImmutableList<String> PET_MESSAGES = ImmutableList.of(
 		"You have a funny feeling like you're being followed", "You feel something weird sneaking into your backpack",
 		"You have a funny feeling like you would have been followed", PET_MESSAGE_DUPLICATE);
 
+
+//region Injections
+	@Inject
+	private Notifier notifier;
+
 	@Inject
 	private Client client;
 
 	@Inject
-	private ClientThread clientThread;
+	private ClientUI clientUI;
 
 	@Inject
-	private DiscordRareDropNotificaterConfig config;
+	private  ClientThread clientThread;
+
+	@Inject
+	private BingoPartyConfig config;
 
 	@Inject
 	private ItemManager itemManager;
@@ -96,27 +108,46 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 	@Inject
 	private DrawManager drawManager;
 
+	@Inject
+	private ConfigManager configManager;
+
+//endregion
+
+//region Private Variables
 	private final RarityChecker rarityChecker = new RarityChecker();
 
 	private CompletableFuture<java.awt.Image> queuedScreenshot = null;
 
+	private List<String> ItemsList;
+//endregion
+
 	@Provides
-	DiscordRareDropNotificaterConfig provideConfig(ConfigManager configManager)
+	BingoPartyConfig provideConfig(ConfigManager configManager)
 	{
-		return configManager.getConfig(DiscordRareDropNotificaterConfig.class);
+		return configManager.getConfig(BingoPartyConfig.class);
 	}
 
+//region Lifecycle Overrides
 	@Override
 	protected void startUp() throws Exception
 	{
-		JsonUtils.getInstance();
+		if (!config.itemsListCode().isEmpty() && config.loadedItemsList().isEmpty()) {
+			try {
+				ItemsList = LoadItemsList(config.itemsListCode());
+				configManager.setConfiguration("bingoparty", "loadedItemsList", Arrays.toString(ItemsList.toArray()));
+			}
+			catch (Exception ex) {
+				log.error(ex.getMessage());
+				notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+			}
+		}
 		super.startUp();
 	}
 
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived npcLootReceived)
 	{
-		if(isPlayerIgnored()) return;
+//		if(isPlayerIgnored()) return;
 
 		NPC npc = npcLootReceived.getNpc();
 		Collection<ItemStack> items = npcLootReceived.getItems();
@@ -133,9 +164,9 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 				return wrapper[0];
 			};
 
-			canBeSent(item.getId(), item.getQuantity(), itemDataSupplier).thenAccept(canSent -> {
-				if (canSent)
-				{
+//			canBeSent(item.getId(), item.getQuantity(), itemDataSupplier).thenAccept(canSent -> {
+//				if (canSent)
+//				{
 					if(wrapper[0] == null){
 						// sets the value
 						log.debug("We're setting the wrapper value");
@@ -145,8 +176,8 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 					wrapper[0].thenAccept(itemData -> {
 						futures.add(processNpcNotification(npc, item.getId(), item.getQuantity(), itemData.Rarity));
 					});
-				}
-			});
+//				}
+//			});
 		}
 
 		if (futures.size() > 0)
@@ -168,7 +199,7 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 	@Subscribe
 	public void onLootReceived(LootReceived lootReceived)
 	{
-		if(isPlayerIgnored()) return;
+//		if(isPlayerIgnored()) return;
 
 		// Only process EVENTS such as Barrows, CoX etc. and PICKPOCKET
 		// For NPCs onNpcLootReceived receives more information and is used instead.
@@ -182,11 +213,11 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 
 		for (ItemStack item : items)
 		{
-			canBeSent(item.getId(), item.getQuantity(), () -> getLootReceivedItemData(lootReceived.getName(), lootReceived.getType(), item.getId())).thenAccept(canSent -> {
-				if(canSent){
+//			canBeSent(item.getId(), item.getQuantity(), () -> getLootReceivedItemData(lootReceived.getName(), lootReceived.getType(), item.getId())).thenAccept(canSent -> {
+//				if(canSent){
 					futures.add(processEventNotification(lootReceived.getType(), lootReceived.getName(), item.getId(), item.getQuantity()));
-				}
-			});
+//				}
+//			});
 		}
 
 		CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
@@ -205,6 +236,100 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 		}
 	}
 
+	@Subscribe
+	public void onConfigChanged(ConfigChanged configChanged)
+	{
+		try {
+			if (Objects.equals(configChanged.getKey(), "itemsListCode")) {
+
+				if (!configChanged.getNewValue().isEmpty()) {
+					ItemsList = LoadItemsList(config.itemsListCode());
+					notifier.notify("Items list has been successfully loaded!\nThis list will be saved until you edit the code.");
+					UpdateItemListConfig(false);
+				}
+				else {
+					UpdateItemListConfig(true);
+				}
+
+            }
+		}
+		catch (Exception ex) {
+			log.error(ex.getMessage());
+			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+		}
+	}
+
+	@Subscribe
+	public void onChatMessage(ChatMessage event)
+	{
+//		if(isPlayerIgnored()) return;
+
+		String chatMessage = event.getMessage();
+
+		if (event.getType() != ChatMessageType.GAMEMESSAGE
+				&& event.getType() != ChatMessageType.SPAM
+				&& event.getType() != ChatMessageType.TRADE
+				&& event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION)
+		{
+			return;
+		}
+
+		if (PET_MESSAGES.stream().anyMatch(chatMessage::contains))
+		{
+			boolean isDuplicate = chatMessage.contains(PET_MESSAGE_DUPLICATE);
+			log.info(String.format("Possible pet: duplicate=%b (%s, %s) %s", isDuplicate, event.getSender(), event.getName(),
+					event.getMessage()));
+
+			CompletableFuture<java.awt.Image> screenshotFuture = config.sendScreenshot() ? getScreenshot()
+					: CompletableFuture.completedFuture(null);
+
+			screenshotFuture
+					// Waiting for screenshot before checking pet allows us to wait one frame, in
+					// case pet data is not available yet
+					// TODO: Figure out how to get pet info
+					.thenApply(screenshot -> queuePetNotification(getPlayerName(), getPlayerIconUrl(), null, -1, isDuplicate)
+							.thenCompose(_v -> screenshot != null ? sendScreenshot(getWebhookUrls(), screenshot)
+									: CompletableFuture.completedFuture(null)))
+					.exceptionally(e ->
+					{
+						log.error(String.format("onChatMessage (pet) error: %s", e.getMessage()), e);
+						log.error(event.toString());
+						return null;
+					});
+		}
+	}
+
+//endregion
+
+//region Private Functions
+
+	private void UpdateItemListConfig(boolean clear) {
+
+		// NOT working :'(
+		configManager.setConfiguration(
+				"bingoparty",
+				"loadedItemsList",
+				clear ? "" : Arrays.toString(ItemsList.toArray())
+		);
+	}
+
+	private List<String> LoadItemsList(String code) throws Exception {
+		log.info("Updating item list...");
+		notifier.notify("Updating the items list...");
+
+		List<String> itemsList = ApiTool.getInstance().getItemsListFromUrl(code);
+
+		if (!itemsList.isEmpty()) {
+			log.info("Items list has been successfully loaded! - {}", Arrays.toString(itemsList.toArray()));
+
+			return itemsList;
+		}
+		else {
+			throw new Exception("An error occurred when trying to load the items list. Check your code and try again.");
+		}
+	}
+
+
 	private CompletableFuture<ItemData> getLootReceivedItemData(String eventName, LootRecordType lootRecordType, int itemId){
 		CompletableFuture<ItemData> result = new CompletableFuture<>();
 
@@ -222,139 +347,102 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 		return rarityChecker.CheckRarityNPC(npcName, incomplete, itemManager, quantity);
 	}
 
-	@Subscribe
-	public void onChatMessage(ChatMessage event)
-	{
-		if(isPlayerIgnored()) return;
-
-		String chatMessage = event.getMessage();
-
-		if (event.getType() != ChatMessageType.GAMEMESSAGE
-			&& event.getType() != ChatMessageType.SPAM
-			&& event.getType() != ChatMessageType.TRADE
-			&& event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION)
-		{
-			return;
-		}
-
-		if (PET_MESSAGES.stream().anyMatch(chatMessage::contains))
-		{
-			boolean isDuplicate = chatMessage.contains(PET_MESSAGE_DUPLICATE);
-			log.info(String.format("Possible pet: duplicate=%b (%s, %s) %s", isDuplicate, event.getSender(), event.getName(),
-				event.getMessage()));
-
-			CompletableFuture<java.awt.Image> screenshotFuture = config.sendScreenshot() ? getScreenshot()
-				: CompletableFuture.completedFuture(null);
-
-			screenshotFuture
-				// Waiting for screenshot before checking pet allows us to wait one frame, in
-				// case pet data is not available yet
-				// TODO: Figure out how to get pet info
-				.thenApply(screenshot -> queuePetNotification(getPlayerName(), getPlayerIconUrl(), null, -1, isDuplicate)
-					.thenCompose(_v -> screenshot != null ? sendScreenshot(getWebhookUrls(), screenshot)
-						: CompletableFuture.completedFuture(null)))
-				.exceptionally(e ->
-				{
-					log.error(String.format("onChatMessage (pet) error: %s", e.getMessage()), e);
-					log.error(event.toString());
-					return null;
-				});
-		}
-	}
-
-	private boolean isPlayerIgnored()
-	{
-		if(config.whiteListedRSNs().trim().length() > 0) {
-			String playerName = getPlayerName().toLowerCase();
-			List<String> whiteListedRSNs = Arrays.asList(config.whiteListedRSNs().split(","));
-
-			return whiteListedRSNs.stream().noneMatch(rsn -> rsn.length() > 0 && playerName.equals(rsn.toLowerCase()));
-		}
-
-		return false;
-	}
-
-	private CompletableFuture<Boolean> canBeSent(int itemId, int quantity, Supplier<CompletableFuture<ItemData>> itemDataSupplier)
-	{
-		CompletableFuture<Boolean> result = new CompletableFuture<>();
-		ItemComposition comp = itemManager.getItemComposition(itemId);
-		String lowerName = comp.getName().toLowerCase();
-
-		List<String> whitelist = Arrays.stream(config.whiteListedItems()
-			.split(",")).filter(itemName -> itemName.length() > 0)
-			.map(String::toLowerCase).collect(Collectors.toList());
-
-		List<String> blacklist = Arrays.stream(config.ignoredKeywords()
-			.split(",")).filter(itemName -> itemName.length() > 0)
-			.map(String::toLowerCase).collect(Collectors.toList());
-
-		if(log.isDebugEnabled())
-		{
-			log.debug(String.format("Checking if %s can be sent", lowerName));
-		}
-
-		if(whitelist.stream().anyMatch(lowerName::equals)){
-			// It's an exact match with whitelist
-			// This must be sent
-
-			if(log.isDebugEnabled())
-			{
-				log.debug("We're whitelisted. We can be sent");
-			}
-
-			result.complete(true);
-			return result;
-		}
-
-		if(blacklist.stream().anyMatch(lowerName::equals)){
-			// Exact match with blacklist
-			// must be ignored
-
-			if(log.isDebugEnabled())
-			{
-				log.debug("We're blacklisted. We cannot be sent");
-			}
-
-			result.complete(false);
-			return result;
-		}
-
-		if(whitelist.stream().anyMatch(lowerName::contains)){
-			// Fuzzy whitelist
-			// is accepted
-
-			if(log.isDebugEnabled())
-			{
-				log.debug("We're fuzzy whitelisted. We can be sent");
-			}
-
-			result.complete(true);
-			return result;
-		}
-
-		if(blacklist.stream().anyMatch(lowerName::contains)){
-			// Fuzzy blacklist
-			// is ignored
-			if(log.isDebugEnabled())
-			{
-				log.debug("We're fuzzy blacklisted. We cannot be sent");
-			}
-
-			result.complete(false);
-			return result;
-		}
-
-		if(log.isDebugEnabled())
-		{
-			log.debug("We're not in any item list. We need to continue our check.");
-		}
+//	private boolean isPlayerIgnored()
+//	{
+//		if(config.whiteListedRSNs().trim().length() > 0) {
+//			String playerName = getPlayerName().toLowerCase();
+//			List<String> whiteListedRSNs = Arrays.asList(config.whiteListedRSNs().split(","));
+//
+//			return whiteListedRSNs.stream().noneMatch(rsn -> rsn.length() > 0 && playerName.equals(rsn.toLowerCase()));
+//		}
+//
+//		return false;
+//	}
+//endregion
 
 
-		return itemDataSupplier.get().thenCompose(itemData -> {
-			result.complete(meetsRequirements(itemData, quantity));
-			return result;
-		});
-	}
+
+//	private CompletableFuture<Boolean> canBeSent(int itemId, int quantity, Supplier<CompletableFuture<ItemData>> itemDataSupplier)
+//	{
+//		CompletableFuture<Boolean> result = new CompletableFuture<>();
+//		ItemComposition comp = itemManager.getItemComposition(itemId);
+//		String lowerName = comp.getName().toLowerCase();
+//
+//		List<String> whitelist = Arrays.stream(config.whiteListedItems()
+//			.split(",")).filter(itemName -> itemName.length() > 0)
+//			.map(String::toLowerCase).collect(Collectors.toList());
+//
+//		List<String> blacklist = Arrays.stream(config.ignoredKeywords()
+//			.split(",")).filter(itemName -> itemName.length() > 0)
+//			.map(String::toLowerCase).collect(Collectors.toList());
+//
+//		if(log.isDebugEnabled())
+//		{
+//			log.debug(String.format("Checking if %s can be sent", lowerName));
+//		}
+//
+//		if(whitelist.stream().anyMatch(lowerName::equals)){
+//			// It's an exact match with whitelist
+//			// This must be sent
+//
+//			if(log.isDebugEnabled())
+//			{
+//				log.debug("We're whitelisted. We can be sent");
+//			}
+//
+//			result.complete(true);
+//			return result;
+//		}
+//
+//		if(blacklist.stream().anyMatch(lowerName::equals)){
+//			// Exact match with blacklist
+//			// must be ignored
+//
+//			if(log.isDebugEnabled())
+//			{
+//				log.debug("We're blacklisted. We cannot be sent");
+//			}
+//
+//			result.complete(false);
+//			return result;
+//		}
+//
+//		if(whitelist.stream().anyMatch(lowerName::contains)){
+//			// Fuzzy whitelist
+//			// is accepted
+//
+//			if(log.isDebugEnabled())
+//			{
+//				log.debug("We're fuzzy whitelisted. We can be sent");
+//			}
+//
+//			result.complete(true);
+//			return result;
+//		}
+//
+//		if(blacklist.stream().anyMatch(lowerName::contains)){
+//			// Fuzzy blacklist
+//			// is ignored
+//			if(log.isDebugEnabled())
+//			{
+//				log.debug("We're fuzzy blacklisted. We cannot be sent");
+//			}
+//
+//			result.complete(false);
+//			return result;
+//		}
+//
+//		if(log.isDebugEnabled())
+//		{
+//			log.debug("We're not in any item list. We need to continue our check.");
+//		}
+//
+//
+//		return itemDataSupplier.get().thenCompose(itemData -> {
+//			result.complete(meetsRequirements(itemData, quantity));
+//			return result;
+//		});
+//	}
 
 	private CompletableFuture<Boolean> processEventNotification(LootRecordType lootRecordType, String eventName, int itemId, int quantity)
 	{
@@ -371,23 +459,24 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 
 	private boolean meetsRequirements(ItemData item, int quantity)
 	{
-		if (item == null)
-		{
-			return false;
-		}
-
-		if (config.sendUniques() && item.Unique)
-		{
-			return true;
-		}
-
-		int totalGeValue = item.GePrice * quantity;
-		int totalHaValue = item.HaPrice * quantity;
-
-		boolean valueMet = totalGeValue >= config.minValue() || totalHaValue >= config.minValue();
-		boolean rarityMet = item.Rarity <= (1f / config.minRarity());
-
-		return config.andInsteadOfOr() ? (valueMet && rarityMet) : (valueMet || rarityMet);
+		return false;
+//		if (item == null)
+//		{
+//			return false;
+//		}
+//
+//		if (config.sendUniques() && item.Unique)
+//		{
+//			return true;
+//		}
+//
+//		int totalGeValue = item.GePrice * quantity;
+//		int totalHaValue = item.HaPrice * quantity;
+//
+//		boolean valueMet = totalGeValue >= config.minValue() || totalHaValue >= config.minValue();
+//		boolean rarityMet = item.Rarity <= (1f / config.minRarity());
+//
+//		return config.andInsteadOfOr() ? (valueMet && rarityMet) : (valueMet || rarityMet);
 	}
 
 	private ItemData EnrichItem(int itemId)
@@ -473,48 +562,49 @@ public class DiscordRareDropNotificaterPlugin extends Plugin
 		Embed embed = new Embed();
 		embed.setAuthor(author);
 
-		if(config.sendRarityAndValue()) {
-			Field rarityField = new Field();
-			rarityField.setName("Rarity");
-			rarityField.setValue(getRarityString(rarity));
-			rarityField.setInline(true);
-
-			Field haValueField = new Field();
-			haValueField.setName("HA Value");
-			haValueField.setValue(getGPValueString(itemManager.getItemComposition(itemId).getHaPrice() * quantity));
-			haValueField.setInline(true);
-
-			Field geValueField = new Field();
-			geValueField.setName("GE Value");
-			geValueField.setValue(getGPValueString(itemManager.getItemPrice(itemId) * quantity));
-			geValueField.setInline(true);
-
-			embed.setFields(new Field[]{rarityField, haValueField, geValueField});
-		}
+//		if(config.sendRarityAndValue()) {
+//			Field rarityField = new Field();
+//			rarityField.setName("Rarity");
+//			rarityField.setValue(getRarityString(rarity));
+//			rarityField.setInline(true);
+//
+//			Field haValueField = new Field();
+//			haValueField.setName("HA Value");
+//			haValueField.setValue(getGPValueString(itemManager.getItemComposition(itemId).getHaPrice() * quantity));
+//			haValueField.setInline(true);
+//
+//			Field geValueField = new Field();
+//			geValueField.setName("GE Value");
+//			geValueField.setValue(getGPValueString(itemManager.getItemPrice(itemId) * quantity));
+//			geValueField.setInline(true);
+//
+//			embed.setFields(new Field[]{rarityField, haValueField, geValueField});
+//		}
 
 		Image thumbnail = new Image();
 		String iconUrl = ApiTool.getInstance().getIconUrl(itemId);
 		thumbnail.setUrl(iconUrl);
 		embed.setThumbnail(thumbnail);
 
-		CompletableFuture<Void> descFuture = getLootNotificationDescription(itemId, quantity, npcId, npcCombatLevel,
-			npcName, eventName, !config.sendEmbeddedMessage()).handle((notifDesc, e) ->
-		{
-			if (e != null)
-			{
-				log.error(String.format("queueLootNotification (desc %d) error: %s", itemId, e.getMessage()), e);
-			}
-			embed.setDescription(notifDesc);
-			if(!config.sendEmbeddedMessage()) webhookData.setContent("**" + playerName + "** - " + notifDesc);
-
-			return null;
-		});
+		CompletableFuture<String> descFuture = getLootNotificationDescription(itemId, quantity, npcId, npcCombatLevel,
+			npcName, eventName, false) ;
+//		!config.sendEmbeddedMessage()).handle((notifDesc, e) ->
+//		{
+//			if (e != null)
+//			{
+//				log.error(String.format("queueLootNotification (desc %d) error: %s", itemId, e.getMessage()), e);
+//			}
+//			embed.setDescription(notifDesc);
+//			if(!config.sendEmbeddedMessage()) webhookData.setContent("**" + playerName + "** - " + notifDesc);
+//
+//			return null;
+//		});
 
 		return CompletableFuture.allOf(descFuture).thenCompose(_v ->
 		{
-			if(config.sendEmbeddedMessage()) {
+//			if(config.sendEmbeddedMessage()) {
 				webhookData.setEmbeds(new Embed[]{embed});
-			}
+//			}
 			return sendWebhookData(getWebhookUrls(), webhookData);
 		});
 	}

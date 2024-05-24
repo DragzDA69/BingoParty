@@ -14,8 +14,8 @@
       "type": "java",
       "name": "Plugin Test",
       "request": "launch",
-      "mainClass": "com.masterkenth.DiscordRareDropNotificaterPluginTest",
-      "projectName": "discord-rare-drop-notificater"
+      "mainClass": "com.dragz.BingoPartyTest",
+      "projectName": "bingo-party"
     }
   ]
 }

@@ -25,28 +25,16 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.masterkenth.discord;
+package com.dragz.discord;
 
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 @NoArgsConstructor
-public class Embed extends Object
+public class Image extends Object
 {
 	@Getter
 	@Setter
-	private Author author;
-	@Getter
-	@Setter
-	private String description;
-	@Getter
-	@Setter
-	private Image thumbnail;
-	@Getter
-	@Setter
-	private Image image;
-	@Getter
-	@Setter
-	private Field[] fields;
+	private String url;
 }

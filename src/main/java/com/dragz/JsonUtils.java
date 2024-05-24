@@ -1,4 +1,4 @@
-package com.masterkenth;
+package com.dragz;
 
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -7,8 +7,7 @@ import java.util.Objects;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
-import com.google.gson.stream.JsonReader;
-import com.masterkenth.models.Npc;
+import com.dragz.models.Npc;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -30,7 +29,7 @@ public class JsonUtils
 	public JsonUtils()
 	{
 		try(InputStreamReader reader = new InputStreamReader(
-				Objects.requireNonNull(DiscordRareDropNotificaterPlugin.class.getResourceAsStream("/monster-drops.json")),
+				Objects.requireNonNull(BingoPartyPlugin.class.getResourceAsStream("/monster-drops.json")),
 				StandardCharsets.UTF_8)) {
 			npcList = new Gson().fromJson(reader, new TypeToken<List<Npc>>() {}.getType());
 		}

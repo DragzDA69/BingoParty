@@ -1,7 +1,7 @@
 # Bingo Party
 __Plugin for RuneLite__ 
 
-![logo](readme-resources/logo.png)
+![logo](icon.png)
 
 
 

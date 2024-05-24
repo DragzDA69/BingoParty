@@ -30,7 +30,7 @@ idea {
 	}
 }
 
-group = 'com.masterkenth'
+group = 'com.dragz'
 version = '1.4.1'
 sourceCompatibility = '1.8'
 

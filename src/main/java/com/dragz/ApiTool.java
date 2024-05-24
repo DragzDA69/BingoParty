@@ -25,23 +25,22 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.masterkenth;
+package com.dragz;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import net.runelite.client.RuneLite;
-import okhttp3.Cache;
-import okhttp3.Call;
-import okhttp3.Callback;
-import okhttp3.MediaType;
-import okhttp3.MultipartBody;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
-import okhttp3.ResponseBody;
 
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.RuneLite;
+import okhttp3.*;
+
+@Slf4j
 public class ApiTool
 {
 	private static ApiTool _instance;
@@ -65,6 +64,33 @@ public class ApiTool
 	{
 		return String.format("https://static.runelite.net/cache/item/icon/%d.png", id);
 	}
+
+	public List<String> getItemsListFromUrl(String code)
+	{
+        try {
+			List<String> listOfItems = new ArrayList<>();
+			String itemListUrl = String.format("https://pastebin.com/raw/%s", code);
+			Request request = new Request.Builder()
+					.url(new URL(itemListUrl))
+					.addHeader("Accept", "application/json")
+					.method("GET", null)
+					.build();
+
+			Response response = httpClient.newCall(request).execute();
+			if (response.isSuccessful())
+			{
+				String itemsCsvString = new String(response.body().bytes(), StandardCharsets.UTF_8);
+				return Arrays.asList(itemsCsvString.split(","));
+			}
+
+			response.close();
+			return listOfItems;
+        } catch (Exception e) {
+			log.error(e.getMessage());
+            throw new RuntimeException(e);
+        }
+	}
+
 
 	public CompletableFuture<ResponseBody> postRaw(String url, String data, String type)
 	{
