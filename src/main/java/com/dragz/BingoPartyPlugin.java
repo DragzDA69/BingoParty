@@ -47,15 +47,14 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
-import javax.swing.*;
 
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.Notifier;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.config.Notification;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.NpcLootReceived;
@@ -65,26 +64,19 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.ui.ClientUI;
-import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.DrawManager;
-import net.runelite.client.ui.PluginPanel;
 import net.runelite.http.api.loottracker.LootRecordType;
 import okhttp3.*;
 import org.json.JSONObject;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Bingo Party",
+	name = "Bingo Party by Dragz",
 	description = "Sends a detailed notification, with a screenshot, via Discord webhooks whenever you get a pre-determined item for your bingo.",
 	tags = {"discord", "notification", "bingo", "screenshot"}
 )
 public class BingoPartyPlugin extends Plugin
 {
-	private static final String PET_MESSAGE_DUPLICATE = "You have a funny feeling like you would have been followed";
-	private static final ImmutableList<String> PET_MESSAGES = ImmutableList.of(
-		"You have a funny feeling like you're being followed", "You feel something weird sneaking into your backpack",
-		"You have a funny feeling like you would have been followed", PET_MESSAGE_DUPLICATE);
-
 
 //region Injections
 	@Inject
@@ -111,52 +103,98 @@ public class BingoPartyPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
-//endregion
-
-//region Private Variables
-	private final RarityChecker rarityChecker = new RarityChecker();
-
-	private CompletableFuture<java.awt.Image> queuedScreenshot = null;
-
-	private List<String> ItemsList;
-//endregion
-
 	@Provides
 	BingoPartyConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(BingoPartyConfig.class);
 	}
+//endregion
+
+//region Private Variables
+	private static final String PET_MESSAGE_DUPLICATE = "You have a funny feeling like you would have been followed";
+	private static final ImmutableList<String> PET_MESSAGES = ImmutableList.of(
+			"You have a funny feeling like you're being followed", "You feel something weird sneaking into your backpack",
+			"You have a funny feeling like you would have been followed", PET_MESSAGE_DUPLICATE);
+
+	private final RarityChecker rarityChecker = new RarityChecker();
+
+	private CompletableFuture<java.awt.Image> queuedScreenshot = null;
+
+	private final List<String> ItemsList = new ArrayList<>();
+	private final List<ChatMessageData> queuedMessages = new ArrayList<>();
+	private final String MessageHeader = "Bingo Party: ";
+//endregion
 
 //region Lifecycle Overrides
 	@Override
 	protected void startUp() throws Exception
 	{
-		if (!config.itemsListCode().isEmpty() && config.loadedItemsList().isEmpty()) {
-			try {
-				ItemsList = LoadItemsList(config.itemsListCode());
-				configManager.setConfiguration("bingoparty", "loadedItemsList", Arrays.toString(ItemsList.toArray()));
-			}
-			catch (Exception ex) {
-				log.error(ex.getMessage());
-				notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+		super.startUp();
+
+		try {
+			if (!config.itemsListCode().isEmpty()) // load new data from api
+				ItemsList.addAll(LoadItemsList(config.itemsListCode()));
+
+			if (!ItemsList.isEmpty())
+				SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat box for more info.)", true);
+		}
+		catch (Exception ex) {
+			log.error(ex.getMessage());
+			log.error(Arrays.toString(ex.getStackTrace()));
+			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+		}
+	}
+
+	@Override
+	protected void shutDown() throws Exception
+	{
+		super.shutDown();
+
+		try {
+			ItemsList.clear();
+		}
+		catch (Exception ex) {
+			log.error(ex.getMessage());
+			log.error(Arrays.toString(ex.getStackTrace()));
+			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+		}
+	}
+//endregion
+
+//region Event Subscriptions
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged gameStateChanged)
+	{
+		try {
+			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+			{
+				// resend any queued messages
+				if (!queuedMessages.isEmpty())
+					SendMessages(queuedMessages, true);
+
+				// alert user if a list is loaded upon login
+				if (!ItemsList.isEmpty()) {
+					notifier.notify("Items list has been successfully loaded.");
+					SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat for more details)", true);
+				}
 			}
 		}
-		super.startUp();
+		catch (Exception ex) {
+			log.error(ex.getMessage());
+			log.error(Arrays.toString(ex.getStackTrace()));
+			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+		}
 	}
 
 	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived npcLootReceived)
 	{
-//		if(isPlayerIgnored()) return;
-
 		NPC npc = npcLootReceived.getNpc();
 		Collection<ItemStack> items = npcLootReceived.getItems();
 
-		List<CompletableFuture<Boolean>> futures = new ArrayList<CompletableFuture<Boolean>>();
+		List<CompletableFuture<Boolean>> futures = new ArrayList<>();
 		for (ItemStack item : items)
 		{
-			// Use a wrapper to 'capture' the lambda value
-			// this way we only need to call the api once.
 			CompletableFuture<ItemData>[] wrapper = new CompletableFuture[1];
 
 			Supplier<CompletableFuture<ItemData>> itemDataSupplier = () -> {
@@ -164,11 +202,10 @@ public class BingoPartyPlugin extends Plugin
 				return wrapper[0];
 			};
 
-//			canBeSent(item.getId(), item.getQuantity(), itemDataSupplier).thenAccept(canSent -> {
-//				if (canSent)
-//				{
+			shouldUpload(item.getId(), itemDataSupplier).thenAccept(doUpload -> {
+				if (doUpload)
+				{
 					if(wrapper[0] == null){
-						// sets the value
 						log.debug("We're setting the wrapper value");
 						itemDataSupplier.get();
 					}
@@ -176,18 +213,18 @@ public class BingoPartyPlugin extends Plugin
 					wrapper[0].thenAccept(itemData -> {
 						futures.add(processNpcNotification(npc, item.getId(), item.getQuantity(), itemData.Rarity));
 					});
-//				}
-//			});
+				}
+			});
 		}
 
-		if (futures.size() > 0)
+		if (!futures.isEmpty())
 		{
 			CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
-				.thenAccept(_v -> sendScreenshotIfSupposedTo());
+				.thenAccept(_v -> performScreenshotUpload());
 		}
 
 		CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
-			.thenAccept(_v -> sendScreenshotIfSupposedTo()).exceptionally(e ->
+			.thenAccept(_v -> performScreenshotUpload()).exceptionally(e ->
 		{
 			log.error(String.format("onNpcLootReceived error: %s", e.getMessage()), e);
 			log.error(String.format("npc %d items %s", npcLootReceived.getNpc().getId(),
@@ -199,29 +236,26 @@ public class BingoPartyPlugin extends Plugin
 	@Subscribe
 	public void onLootReceived(LootReceived lootReceived)
 	{
-//		if(isPlayerIgnored()) return;
-
 		// Only process EVENTS such as Barrows, CoX etc. and PICKPOCKET
 		// For NPCs onNpcLootReceived receives more information and is used instead.
-		if (lootReceived.getType() == LootRecordType.NPC)
-		{
-			return;
-		}
+		if (lootReceived.getType() == LootRecordType.NPC) { return; }
 
 		Collection<ItemStack> items = lootReceived.getItems();
 		List<CompletableFuture<Boolean>> futures = new ArrayList<>();
 
 		for (ItemStack item : items)
 		{
-//			canBeSent(item.getId(), item.getQuantity(), () -> getLootReceivedItemData(lootReceived.getName(), lootReceived.getType(), item.getId())).thenAccept(canSent -> {
-//				if(canSent){
+			shouldUpload(
+				item.getId(),
+				() -> getLootReceivedItemData(lootReceived.getName(), lootReceived.getType(), item.getId())
+			).thenAccept(doUpload -> {
+				if (doUpload)
 					futures.add(processEventNotification(lootReceived.getType(), lootReceived.getName(), item.getId(), item.getQuantity()));
-//				}
-//			});
+			});
 		}
 
 		CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
-			.thenAccept(_v -> sendScreenshotIfSupposedTo()).exceptionally(e ->
+			.thenAccept(_v -> performScreenshotUpload()).exceptionally(e ->
 		{
 			log.error(String.format("onLootReceived error: %s", e.getMessage()), e);
 			log.error(String.format("event %s items %s", lootReceived.getName(),
@@ -229,10 +263,10 @@ public class BingoPartyPlugin extends Plugin
 			return null;
 		});
 
-		if (futures.size() > 0)
+		if (!futures.isEmpty())
 		{
 			CompletableFuture.allOf(futures.toArray(new CompletableFuture[futures.size()]))
-				.thenAccept(_v -> sendScreenshotIfSupposedTo());
+				.thenAccept(_v -> performScreenshotUpload());
 		}
 	}
 
@@ -240,17 +274,22 @@ public class BingoPartyPlugin extends Plugin
 	public void onConfigChanged(ConfigChanged configChanged)
 	{
 		try {
-			if (Objects.equals(configChanged.getKey(), "itemsListCode")) {
-
-				if (!configChanged.getNewValue().isEmpty()) {
-					ItemsList = LoadItemsList(config.itemsListCode());
-					notifier.notify("Items list has been successfully loaded!\nThis list will be saved until you edit the code.");
-					UpdateItemListConfig(false);
+			if (Objects.equals(configChanged.getKey(), "itemsListCode"))
+			{
+				if (!Objects.requireNonNull(configChanged.getNewValue()).isEmpty())
+				{
+					ItemsList.clear();
+					ItemsList.addAll(LoadItemsList(config.itemsListCode()));
+					notifier.notify("Items list has been successfully loaded.");
+					SendLoadedMessages(MessageHeader + "Items list has been updated! (See chat for more details)", true);
 				}
-				else {
-					UpdateItemListConfig(true);
+				else
+				{
+					// clear out loaded list
+					ItemsList.clear();
+					notifier.notify("Items list was cleared");
+					SendMessage(ChatMessageData.NewBroadcastMessage(MessageHeader + "Items list was cleared."));
 				}
-
             }
 		}
 		catch (Exception ex) {
@@ -262,73 +301,102 @@ public class BingoPartyPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-//		if(isPlayerIgnored()) return;
-
 		String chatMessage = event.getMessage();
 
-		if (event.getType() != ChatMessageType.GAMEMESSAGE
-				&& event.getType() != ChatMessageType.SPAM
-				&& event.getType() != ChatMessageType.TRADE
-				&& event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION)
-		{
-			return;
-		}
+		if (event.getType() != ChatMessageType.GAMEMESSAGE &&
+			event.getType() != ChatMessageType.SPAM &&
+			event.getType() != ChatMessageType.TRADE &&
+			event.getType() != ChatMessageType.FRIENDSCHATNOTIFICATION)
+				return;
 
 		if (PET_MESSAGES.stream().anyMatch(chatMessage::contains))
 		{
 			boolean isDuplicate = chatMessage.contains(PET_MESSAGE_DUPLICATE);
-			log.info(String.format("Possible pet: duplicate=%b (%s, %s) %s", isDuplicate, event.getSender(), event.getName(),
-					event.getMessage()));
+			log.info(String.format("Possible pet: duplicate=%b (%s, %s) %s", isDuplicate, event.getSender(), event.getName(), event.getMessage()));
 
 			CompletableFuture<java.awt.Image> screenshotFuture = config.sendScreenshot() ? getScreenshot()
-					: CompletableFuture.completedFuture(null);
+				: CompletableFuture.completedFuture(null);
 
 			screenshotFuture
-					// Waiting for screenshot before checking pet allows us to wait one frame, in
-					// case pet data is not available yet
-					// TODO: Figure out how to get pet info
-					.thenApply(screenshot -> queuePetNotification(getPlayerName(), getPlayerIconUrl(), null, -1, isDuplicate)
-							.thenCompose(_v -> screenshot != null ? sendScreenshot(getWebhookUrls(), screenshot)
-									: CompletableFuture.completedFuture(null)))
-					.exceptionally(e ->
-					{
-						log.error(String.format("onChatMessage (pet) error: %s", e.getMessage()), e);
-						log.error(event.toString());
-						return null;
-					});
+				// Waiting for screenshot before checking pet allows us to wait one frame,
+				// in case pet data is not available yet
+				// TODO: Figure out how to get pet info
+				.thenApply(screenshot -> queuePetNotification(getPlayerName(), getPlayerIconUrl(), null, -1, isDuplicate)
+					.thenCompose(_v -> screenshot != null ? sendScreenshot(getWebhookUrls(), screenshot)
+						: CompletableFuture.completedFuture(null)))
+				.exceptionally(e ->
+				{
+					log.error(String.format("onChatMessage (pet) error: %s", e.getMessage()), e);
+					log.error(event.toString());
+					return null;
+				});
 		}
 	}
-
 //endregion
 
-//region Private Functions
+//region Private Methods
+	private void SendLoadedMessages(String broadcastMessage, Boolean sendGameMessage) {
+		List<ChatMessageData> messagesToSend = new ArrayList<>();
 
-	private void UpdateItemListConfig(boolean clear) {
+		if (!broadcastMessage.isEmpty())
+			messagesToSend.add(ChatMessageData.NewBroadcastMessage(broadcastMessage));
 
-		// NOT working :'(
-		configManager.setConfiguration(
-				"bingoparty",
-				"loadedItemsList",
-				clear ? "" : Arrays.toString(ItemsList.toArray())
-		);
+		if (sendGameMessage)
+		{
+			messagesToSend.add(ChatMessageData.NewGameMessage(String.format(MessageHeader + "The bingo items list has been successfully loaded!")));
+			messagesToSend.add(ChatMessageData.NewGameMessage(String.format(MessageHeader + "Items loaded: %s", String.join(", ", ItemsList))));
+		}
+		SendMessages(messagesToSend, false);
+	}
+
+	private void SendMessage(ChatMessageData msg)
+	{
+		clientThread.invoke(() -> client.addChatMessage(msg.messageType, msg.name, msg.message, null));
+	}
+
+	private void SendMessages(List<ChatMessageData> messagesList, Boolean areQueuedMessages)
+	{
+		if (!messagesList.isEmpty())
+		{
+			if (client.getGameState() == GameState.LOGGED_IN)
+			{
+				log.info("User is logged in, sending messages");
+				for (ChatMessageData msg: messagesList)
+					SendMessage(msg);
+
+				// remove messages from queue once they have been sent
+				if (areQueuedMessages)
+					queuedMessages.clear();
+			}
+			else
+			{
+				log.info("User is not logged in; queueing messages");
+				// do not re-queue messages if they already came from the queue
+				if (!areQueuedMessages)
+					queuedMessages.addAll(messagesList);
+			}
+		}
 	}
 
 	private List<String> LoadItemsList(String code) throws Exception {
 		log.info("Updating item list...");
-		notifier.notify("Updating the items list...");
+		SendMessage(ChatMessageData.NewGameMessage("Loading items list for code \"" + config.itemsListCode() + "\"..."));
 
-		List<String> itemsList = ApiTool.getInstance().getItemsListFromUrl(code);
+		List<String> itemsList = ApiTool.getInstance().loadItemsList(code);
 
-		if (!itemsList.isEmpty()) {
-			log.info("Items list has been successfully loaded! - {}", Arrays.toString(itemsList.toArray()));
-
+		if (!itemsList.isEmpty())
+		{
+			log.info("Items list has been successfully loaded! - {}", String.join(", ", itemsList));
 			return itemsList;
 		}
-		else {
+		else
+		{
 			throw new Exception("An error occurred when trying to load the items list. Check your code and try again.");
 		}
 	}
+//endregion
 
+//region Functionality methods
 
 	private CompletableFuture<ItemData> getLootReceivedItemData(String eventName, LootRecordType lootRecordType, int itemId){
 		CompletableFuture<ItemData> result = new CompletableFuture<>();
@@ -358,91 +426,27 @@ public class BingoPartyPlugin extends Plugin
 //
 //		return false;
 //	}
-//endregion
 
+	private CompletableFuture<Boolean> shouldUpload(int itemId, Supplier<CompletableFuture<ItemData>> itemDataSupplier)
+	{
+		CompletableFuture<Boolean> result = new CompletableFuture<>();
+		ItemComposition comp = itemManager.getItemComposition(itemId);
+		String lowerName = comp.getName().toLowerCase();
 
+		if(log.isDebugEnabled()) { log.info(String.format("Determining if %s should be uploaded...", lowerName)); }
+		if(ItemsList.stream().anyMatch(lowerName::equals)){
+			// Item is on the list
+			if(log.isDebugEnabled()) { log.info("Item is on the list!"); }
+			result.complete(true);
+			return result;
+		}
 
-//	private CompletableFuture<Boolean> canBeSent(int itemId, int quantity, Supplier<CompletableFuture<ItemData>> itemDataSupplier)
-//	{
-//		CompletableFuture<Boolean> result = new CompletableFuture<>();
-//		ItemComposition comp = itemManager.getItemComposition(itemId);
-//		String lowerName = comp.getName().toLowerCase();
-//
-//		List<String> whitelist = Arrays.stream(config.whiteListedItems()
-//			.split(",")).filter(itemName -> itemName.length() > 0)
-//			.map(String::toLowerCase).collect(Collectors.toList());
-//
-//		List<String> blacklist = Arrays.stream(config.ignoredKeywords()
-//			.split(",")).filter(itemName -> itemName.length() > 0)
-//			.map(String::toLowerCase).collect(Collectors.toList());
-//
-//		if(log.isDebugEnabled())
-//		{
-//			log.debug(String.format("Checking if %s can be sent", lowerName));
-//		}
-//
-//		if(whitelist.stream().anyMatch(lowerName::equals)){
-//			// It's an exact match with whitelist
-//			// This must be sent
-//
-//			if(log.isDebugEnabled())
-//			{
-//				log.debug("We're whitelisted. We can be sent");
-//			}
-//
-//			result.complete(true);
-//			return result;
-//		}
-//
-//		if(blacklist.stream().anyMatch(lowerName::equals)){
-//			// Exact match with blacklist
-//			// must be ignored
-//
-//			if(log.isDebugEnabled())
-//			{
-//				log.debug("We're blacklisted. We cannot be sent");
-//			}
-//
-//			result.complete(false);
-//			return result;
-//		}
-//
-//		if(whitelist.stream().anyMatch(lowerName::contains)){
-//			// Fuzzy whitelist
-//			// is accepted
-//
-//			if(log.isDebugEnabled())
-//			{
-//				log.debug("We're fuzzy whitelisted. We can be sent");
-//			}
-//
-//			result.complete(true);
-//			return result;
-//		}
-//
-//		if(blacklist.stream().anyMatch(lowerName::contains)){
-//			// Fuzzy blacklist
-//			// is ignored
-//			if(log.isDebugEnabled())
-//			{
-//				log.debug("We're fuzzy blacklisted. We cannot be sent");
-//			}
-//
-//			result.complete(false);
-//			return result;
-//		}
-//
-//		if(log.isDebugEnabled())
-//		{
-//			log.debug("We're not in any item list. We need to continue our check.");
-//		}
-//
-//
-//		return itemDataSupplier.get().thenCompose(itemData -> {
-//			result.complete(meetsRequirements(itemData, quantity));
-//			return result;
-//		});
-//	}
+		if(log.isDebugEnabled())  { log.info("We're not in any item list. We need to continue our check."); }
+		return itemDataSupplier.get().thenCompose(itemData -> {
+			result.complete(false);
+			return result;
+		});
+	}
 
 	private CompletableFuture<Boolean> processEventNotification(LootRecordType lootRecordType, String eventName, int itemId, int quantity)
 	{
@@ -457,9 +461,9 @@ public class BingoPartyPlugin extends Plugin
 		return CompletableFuture.completedFuture(false);
 	}
 
-	private boolean meetsRequirements(ItemData item, int quantity)
-	{
-		return false;
+//	private boolean meetsRequirements(ItemData item, int quantity)
+//	{
+//		return false;
 //		if (item == null)
 //		{
 //			return false;
@@ -477,7 +481,7 @@ public class BingoPartyPlugin extends Plugin
 //		boolean rarityMet = item.Rarity <= (1f / config.minRarity());
 //
 //		return config.andInsteadOfOr() ? (valueMet && rarityMet) : (valueMet || rarityMet);
-	}
+//	}
 
 	private ItemData EnrichItem(int itemId)
 	{
@@ -487,7 +491,7 @@ public class BingoPartyPlugin extends Plugin
 		r.HaPrice = itemManager.getItemComposition(itemId).getHaPrice();
 
 		if(log.isDebugEnabled()){
-			log.debug(MessageFormat.format("Item {0} prices HA{1}, GE{2}", itemId, r.HaPrice, r.GePrice));
+			log.info(MessageFormat.format("Item {0} prices HA{1}, GE{2}", itemId, r.HaPrice, r.GePrice));
 		}
 
 		return r;
@@ -528,7 +532,7 @@ public class BingoPartyPlugin extends Plugin
 		}
 	}
 
-	private void sendScreenshotIfSupposedTo()
+	private void performScreenshotUpload()
 	{
 		if (queuedScreenshot != null && config.sendScreenshot())
 		{
@@ -554,32 +558,29 @@ public class BingoPartyPlugin extends Plugin
 		Author author = new Author();
 		author.setName(playerName);
 
-		if (playerIconUrl != null)
-		{
-			author.setIcon_url(playerIconUrl);
-		}
+		if (playerIconUrl != null) author.setIcon_url(playerIconUrl);
 
 		Embed embed = new Embed();
 		embed.setAuthor(author);
 
-//		if(config.sendRarityAndValue()) {
-//			Field rarityField = new Field();
-//			rarityField.setName("Rarity");
-//			rarityField.setValue(getRarityString(rarity));
-//			rarityField.setInline(true);
-//
-//			Field haValueField = new Field();
-//			haValueField.setName("HA Value");
-//			haValueField.setValue(getGPValueString(itemManager.getItemComposition(itemId).getHaPrice() * quantity));
-//			haValueField.setInline(true);
-//
-//			Field geValueField = new Field();
-//			geValueField.setName("GE Value");
-//			geValueField.setValue(getGPValueString(itemManager.getItemPrice(itemId) * quantity));
-//			geValueField.setInline(true);
-//
-//			embed.setFields(new Field[]{rarityField, haValueField, geValueField});
-//		}
+		if(config.sendDropRateAndValue()) {
+			Field rarityField = new Field();
+			rarityField.setName("Rarity");
+			rarityField.setValue(getRarityString(rarity));
+			rarityField.setInline(true);
+
+			Field haValueField = new Field();
+			haValueField.setName("HA Value");
+			haValueField.setValue(getGPValueString(itemManager.getItemComposition(itemId).getHaPrice() * quantity));
+			haValueField.setInline(true);
+
+			Field geValueField = new Field();
+			geValueField.setName("GE Value");
+			geValueField.setValue(getGPValueString(itemManager.getItemPrice(itemId) * quantity));
+			geValueField.setInline(true);
+
+			embed.setFields(new Field[]{rarityField, haValueField, geValueField});
+		}
 
 		Image thumbnail = new Image();
 		String iconUrl = ApiTool.getInstance().getIconUrl(itemId);
@@ -587,24 +588,16 @@ public class BingoPartyPlugin extends Plugin
 		embed.setThumbnail(thumbnail);
 
 		CompletableFuture<String> descFuture = getLootNotificationDescription(itemId, quantity, npcId, npcCombatLevel,
-			npcName, eventName, false) ;
-//		!config.sendEmbeddedMessage()).handle((notifDesc, e) ->
-//		{
-//			if (e != null)
-//			{
-//				log.error(String.format("queueLootNotification (desc %d) error: %s", itemId, e.getMessage()), e);
-//			}
-//			embed.setDescription(notifDesc);
-//			if(!config.sendEmbeddedMessage()) webhookData.setContent("**" + playerName + "** - " + notifDesc);
-//
-//			return null;
-//		});
+			npcName, eventName, false).handle((notifyDesc, e) ->
+		{
+			if (e != null) log.error(String.format("queueLootNotification (desc %d) error: %s", itemId, e.getMessage()), e);
+			embed.setDescription(notifyDesc);
+			return null;
+		});
 
 		return CompletableFuture.allOf(descFuture).thenCompose(_v ->
 		{
-//			if(config.sendEmbeddedMessage()) {
-				webhookData.setEmbeds(new Embed[]{embed});
-//			}
+			webhookData.setEmbeds(new Embed[]{embed});
 			return sendWebhookData(getWebhookUrls(), webhookData);
 		});
 	}
@@ -816,4 +809,5 @@ public class BingoPartyPlugin extends Plugin
 		return Arrays.asList(config.webhookUrl().split("[\\n,]")).stream().filter(u -> u.length() > 0).map(u -> u.trim())
 			.collect(Collectors.toList());
 	}
+//endregion
 }

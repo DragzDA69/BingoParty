@@ -65,7 +65,7 @@ public class ApiTool
 		return String.format("https://static.runelite.net/cache/item/icon/%d.png", id);
 	}
 
-	public List<String> getItemsListFromUrl(String code)
+	public List<String> loadItemsList(String code)
 	{
         try {
 			List<String> listOfItems = new ArrayList<>();
