@@ -1,4 +1,4 @@
-package com.dragz;
+package com.dragz.models;
 
 public class ItemData
 {

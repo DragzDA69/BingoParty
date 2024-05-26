@@ -30,6 +30,7 @@ package com.dragz;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
+import com.dragz.models.ItemData;
 import com.dragz.models.Npc;
 import com.dragz.models.NpcItem;
 import lombok.extern.slf4j.Slf4j;

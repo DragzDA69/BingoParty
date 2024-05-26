@@ -1,4 +1,4 @@
-package com.dragz;
+package com.dragz.models;
 
 import net.runelite.api.ChatMessageType;
 

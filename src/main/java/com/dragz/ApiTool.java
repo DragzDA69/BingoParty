@@ -35,10 +35,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.RuneLite;
 import okhttp3.*;
+
+
 
 @Slf4j
 public class ApiTool
@@ -72,7 +73,7 @@ public class ApiTool
 			String itemListUrl = String.format("https://pastebin.com/raw/%s", code);
 			Request request = new Request.Builder()
 					.url(new URL(itemListUrl))
-					.addHeader("Accept", "application/json")
+					.addHeader("Accept", "application/text")
 					.method("GET", null)
 					.build();
 

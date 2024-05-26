@@ -27,6 +27,9 @@
  */
 package com.dragz;
 
+//region Imports
+import com.dragz.models.ChatMessageData;
+import com.dragz.models.ItemData;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Provides;
 import com.dragz.discord.Author;
@@ -45,13 +48,18 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 
+import com.google.inject.spi.Message;
+import lombok.Getter;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.client.Notifier;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -63,11 +71,19 @@ import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.http.api.loottracker.LootRecordType;
 import okhttp3.*;
 import org.json.JSONObject;
+import javax.swing.SwingUtilities;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
+
+//endregion
 
 @Slf4j
 @PluginDescriptor(
@@ -86,6 +102,9 @@ public class BingoPartyPlugin extends Plugin
 	private Client client;
 
 	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
 	private ClientUI clientUI;
 
 	@Inject
@@ -93,6 +112,9 @@ public class BingoPartyPlugin extends Plugin
 
 	@Inject
 	private BingoPartyConfig config;
+
+	@Inject
+	private BingoPartyPanel panel;
 
 	@Inject
 	private ItemManager itemManager;
@@ -103,11 +125,6 @@ public class BingoPartyPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
-	@Provides
-	BingoPartyConfig provideConfig(ConfigManager configManager)
-	{
-		return configManager.getConfig(BingoPartyConfig.class);
-	}
 //endregion
 
 //region Private Variables
@@ -120,69 +137,122 @@ public class BingoPartyPlugin extends Plugin
 
 	private CompletableFuture<java.awt.Image> queuedScreenshot = null;
 
-	private final List<String> ItemsList = new ArrayList<>();
+	@Getter
+    public final List<String> ItemsList = new ArrayList<>();
 	private final List<ChatMessageData> queuedMessages = new ArrayList<>();
 	private final String MessageHeader = "Bingo Party: ";
+
+    private boolean buttonAttached;
+	private NavigationButton navButton;
+
 //endregion
 
 //region Lifecycle Overrides
-	@Override
+    @Override
 	protected void startUp() throws Exception
 	{
 		super.startUp();
 
-		try {
-			if (!config.itemsListCode().isEmpty()) // load new data from api
-				ItemsList.addAll(LoadItemsList(config.itemsListCode()));
+		try
+		{
+//			BingoPartyPanel panel = injector.getInstance(BingoPartyPanel.class);
+			panel.init();
 
-			if (!ItemsList.isEmpty())
-				SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat box for more info.)", true);
+			final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/util/refresh_icon.png");
+
+			navButton = NavigationButton.builder()
+					.tooltip("Bingo Party Items Refresh")
+					.icon(icon)
+					.priority(1)
+					.panel(panel)
+					.build();
+
+//			clientToolbar.addNavigation(navButton);
+
+//			if (!config.itemsListCode().isEmpty()) // load new data from api
+//				ItemsList.addAll(LoadItemsList(config.itemsListCode()));
+//
+//			if (!ItemsList.isEmpty())
+//				SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat box for more info.)", true);
 		}
 		catch (Exception ex) {
-			log.error(ex.getMessage());
-			log.error(Arrays.toString(ex.getStackTrace()));
-			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+			ThrowException(ex);
 		}
 	}
 
 	@Override
 	protected void shutDown() throws Exception
 	{
-		super.shutDown();
-
-		try {
+		buttonAttached = false;
+		try
+		{
 			ItemsList.clear();
+//			panel.ClearList();
+			clientToolbar.removeNavigation(navButton);
 		}
 		catch (Exception ex) {
-			log.error(ex.getMessage());
-			log.error(Arrays.toString(ex.getStackTrace()));
-			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+			ThrowException(ex);
 		}
+		super.shutDown();
 	}
 //endregion
 
 //region Event Subscriptions
+
+	@Provides
+	BingoPartyConfig provideConfig(ConfigManager configManager)
+	{
+		return configManager.getConfig(BingoPartyConfig.class);
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		boolean shouldShow = client.getGameState() == GameState.LOGGED_IN;
+		if (shouldShow != buttonAttached)
+		{
+			SwingUtilities.invokeLater(() ->
+			{
+				if (shouldShow)
+					clientToolbar.addNavigation(navButton);
+				else
+					clientToolbar.removeNavigation(navButton);
+			});
+			buttonAttached = shouldShow;
+		}
+	}
+
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
 	{
 		try {
-			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
-			{
-				// resend any queued messages
-				if (!queuedMessages.isEmpty())
-					SendMessages(queuedMessages, true);
 
-				// alert user if a list is loaded upon login
-				if (!ItemsList.isEmpty()) {
-					notifier.notify("Items list has been successfully loaded.");
-					SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat for more details)", true);
-				}
+			switch (gameStateChanged.getGameState()) {
+				case LOGGED_IN:
+					// resend any queued messages
+					if (!queuedMessages.isEmpty())
+						SendMessages(queuedMessages, true);
+
+					// alert user if a list is loaded upon login
+					if (!ItemsList.isEmpty()) {
+						SendLoadedMessages(MessageHeader + "Items list has been loaded! (See chat for more details)", true);
+					}
+					break;
+
+				case LOGIN_SCREEN:
+					SwingUtilities.invokeLater(() ->
+					{
+						clientToolbar.removeNavigation(navButton);
+						buttonAttached = false;
+					});
+					break;
+
+				default:
+					break;
 			}
 		}
 		catch (Exception ex) {
-			log.error(ex.getMessage());
-			log.error(Arrays.toString(ex.getStackTrace()));
-			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+			ThrowException(ex);
 		}
 	}
 
@@ -273,28 +343,29 @@ public class BingoPartyPlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged configChanged)
 	{
-		try {
+		try
+		{
 			if (Objects.equals(configChanged.getKey(), "itemsListCode"))
 			{
-				if (!Objects.requireNonNull(configChanged.getNewValue()).isEmpty())
+				if (Objects.requireNonNull(configChanged.getNewValue()).isEmpty())
 				{
 					ItemsList.clear();
-					ItemsList.addAll(LoadItemsList(config.itemsListCode()));
-					notifier.notify("Items list has been successfully loaded.");
-					SendLoadedMessages(MessageHeader + "Items list has been updated! (See chat for more details)", true);
+					panel.ClearList();
+
+					String msg = "Items list has been cleared.";
+					SendMessage(ChatMessageData.NewBroadcastMessage(MessageHeader + msg));
+//					notifier.notify(msg);
 				}
 				else
 				{
-					// clear out loaded list
-					ItemsList.clear();
-					notifier.notify("Items list was cleared");
-					SendMessage(ChatMessageData.NewBroadcastMessage(MessageHeader + "Items list was cleared."));
+					String msg = "List code was changed. Go to the panel to load the new list.";
+					SendMessage(ChatMessageData.NewBroadcastMessage(MessageHeader + msg));
+//					notifier.notify(msg);
 				}
             }
 		}
 		catch (Exception ex) {
-			log.error(ex.getMessage());
-			notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+			ThrowException(ex);
 		}
 	}
 
@@ -332,9 +403,38 @@ public class BingoPartyPlugin extends Plugin
 				});
 		}
 	}
+
 //endregion
 
 //region Private Methods
+	@SneakyThrows
+    public List<String> RefreshList()
+	{
+		try {
+			log.info("Refreshing the list... (the list has also been cleared at this point)");
+			ItemsList.clear();
+
+			if(config.itemsListCode().isEmpty())
+			{
+				throw new Exception("You need to enter a pastebin code!");
+			}
+
+			ItemsList.addAll(LoadItemsList(config.itemsListCode()));
+
+			if (!ItemsList.isEmpty())
+			{
+				SendLoadedMessages(MessageHeader + "Items list has been loaded! (see chat box for list)", true);
+//			notifier.notify("Items list has been loaded!");
+				return ItemsList;
+			}
+		}
+		catch (Exception ex) {
+			ThrowException(ex);
+		}
+
+		return new ArrayList<>();
+	}
+
 	private void SendLoadedMessages(String broadcastMessage, Boolean sendGameMessage) {
 		List<ChatMessageData> messagesToSend = new ArrayList<>();
 
@@ -378,7 +478,8 @@ public class BingoPartyPlugin extends Plugin
 		}
 	}
 
-	private List<String> LoadItemsList(String code) throws Exception {
+    private List<String> LoadItemsList(String code) throws Exception
+	{
 		log.info("Updating item list...");
 		SendMessage(ChatMessageData.NewGameMessage("Loading items list for code \"" + config.itemsListCode() + "\"..."));
 
@@ -394,6 +495,14 @@ public class BingoPartyPlugin extends Plugin
 			throw new Exception("An error occurred when trying to load the items list. Check your code and try again.");
 		}
 	}
+
+	private void ThrowException(Exception ex)
+	{
+		log.error(ex.getMessage());
+		log.error(Arrays.toString(ex.getStackTrace()));
+		notifier.notify(ex.getMessage(), TrayIcon.MessageType.ERROR);
+	}
+
 //endregion
 
 //region Functionality methods
@@ -414,18 +523,6 @@ public class BingoPartyPlugin extends Plugin
 		ItemData incomplete = EnrichItem(itemId);
 		return rarityChecker.CheckRarityNPC(npcName, incomplete, itemManager, quantity);
 	}
-
-//	private boolean isPlayerIgnored()
-//	{
-//		if(config.whiteListedRSNs().trim().length() > 0) {
-//			String playerName = getPlayerName().toLowerCase();
-//			List<String> whiteListedRSNs = Arrays.asList(config.whiteListedRSNs().split(","));
-//
-//			return whiteListedRSNs.stream().noneMatch(rsn -> rsn.length() > 0 && playerName.equals(rsn.toLowerCase()));
-//		}
-//
-//		return false;
-//	}
 
 	private CompletableFuture<Boolean> shouldUpload(int itemId, Supplier<CompletableFuture<ItemData>> itemDataSupplier)
 	{
@@ -460,28 +557,6 @@ public class BingoPartyPlugin extends Plugin
 
 		return CompletableFuture.completedFuture(false);
 	}
-
-//	private boolean meetsRequirements(ItemData item, int quantity)
-//	{
-//		return false;
-//		if (item == null)
-//		{
-//			return false;
-//		}
-//
-//		if (config.sendUniques() && item.Unique)
-//		{
-//			return true;
-//		}
-//
-//		int totalGeValue = item.GePrice * quantity;
-//		int totalHaValue = item.HaPrice * quantity;
-//
-//		boolean valueMet = totalGeValue >= config.minValue() || totalHaValue >= config.minValue();
-//		boolean rarityMet = item.Rarity <= (1f / config.minRarity());
-//
-//		return config.andInsteadOfOr() ? (valueMet && rarityMet) : (valueMet || rarityMet);
-//	}
 
 	private ItemData EnrichItem(int itemId)
 	{
